@@ -1,3 +1,12 @@
+### 1.0.4
+
+2025-12-17 07:45
+
+#### FIXED
+
+- Release workflow needs write permission
+- Release commit message collecting STDERR
+
 ### 1.0.3
 
 2025-12-17 07:42

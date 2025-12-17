@@ -2,6 +2,6 @@
 
 module DockEdit
   # Current dockedit gem version.
-  VERSION = '1.0.3'
+  VERSION = '1.0.4'
 end
 
