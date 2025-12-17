@@ -539,6 +539,12 @@ def cmd_space(args)
 
   parser = OptionParser.new do |opts|
     opts.banner = "Usage: dockedit space [options]"
+    opts.separator ""
+    opts.separator "Examples:"
+    opts.separator "  dockedit space"
+    opts.separator "  dockedit space --small"
+    opts.separator "  dockedit space --after Safari"
+    opts.separator "  dockedit space --small --after Terminal --after Safari"
     opts.on('-s', '--small', '--half', 'Insert a small/half-size space') { options[:small] = true }
     opts.on('-a', '--after APP', 'Insert after specified app (fuzzy match, repeatable)') { |app| options[:after] << app }
   end
@@ -621,6 +627,12 @@ def cmd_add(args)
 
   parser = OptionParser.new do |opts|
     opts.banner = "Usage: dockedit add [options] <app_or_folder> [...]"
+    opts.separator ""
+    opts.separator "Examples:"
+    opts.separator "  dockedit add Safari Terminal"
+    opts.separator "  dockedit add ~/Downloads --show grid --display stack"
+    opts.separator "  dockedit add Notes --after Safari"
+    opts.separator "  dockedit add ~/Sites --display folder --show grid"
     opts.on('-a', '--after ITEM', 'Insert after specified app/folder (fuzzy match)') { |app| options[:after] = app }
     opts.on('--show TYPE', '--view TYPE', 'Folder view: fan/f, grid/g, list/l, auto/a (default: auto)') { |t| options[:show_as] = parse_show_as(t) }
     opts.on('--display TYPE', 'Folder style: folder/f, stack/s (default: folder)') { |t| options[:display_as] = parse_display_as(t) }
@@ -811,6 +823,11 @@ end
 def cmd_remove(args)
   parser = OptionParser.new do |opts|
     opts.banner = "Usage: dockedit remove <app_or_folder> [...]"
+    opts.separator ""
+    opts.separator "Examples:"
+    opts.separator "  dockedit remove Safari Terminal"
+    opts.separator "  dockedit remove ~/Downloads"
+    opts.separator "  dockedit remove --help"
   end
   parser.order!(args)
 
@@ -875,34 +892,48 @@ end
 
 # Move app subcommand
 def cmd_move(args)
-  options = { after: nil }
 
+  # Accept either order: move --after TARGET ITEM or move ITEM --after TARGET
+  options = { after: nil }
   parser = OptionParser.new do |opts|
-    opts.banner = "Usage: dockedit move --after <target> <item_to_move>"
+    opts.banner = "Usage: dockedit move --after <target> <item_to_move> OR dockedit move <item_to_move> --after <target>"
+    opts.separator ""
+    opts.separator "Examples:"
+    opts.separator "  dockedit move --after Terminal Safari"
+    opts.separator "  dockedit move Safari --after Terminal"
     opts.on('-a', '--after ITEM', 'Move after specified app/folder (required, fuzzy match)') { |app| options[:after] = app }
   end
-  parser.order!(args)
+  # Use permute! to allow flags before or after positional args
+  parser.permute!(args)
 
+  # Now, args should contain the non-option arguments (either [item] or [target, item] or [item, target])
   after_target = options[:after]
 
-  unless after_target
-    $stderr.puts "Error: --after flag is required"
+  # Accept either order: --after TARGET ITEM or ITEM --after TARGET
+  item_query = nil
+  if after_target && args.length == 1
+    item_query = args.first
+  elsif after_target && args.length == 2
+    # Try to infer which is the item and which is the target
+    if args[0].downcase == after_target.downcase
+      item_query = args[1]
+    elsif args[1].downcase == after_target.downcase
+      item_query = args[0]
+    else
+      # Default: treat first as item
+      item_query = args[0]
+    end
+  else
     $stderr.puts parser
+    $stderr.puts "\nError: You must specify an item to move and a target with --after."
     exit 1
   end
 
-  if args.empty?
-    $stderr.puts "Error: Item to move is required"
+  if !after_target || !item_query
     $stderr.puts parser
+    $stderr.puts "\nError: You must specify an item to move and a target with --after."
     exit 1
   end
-
-  if args.length > 1
-    $stderr.puts "Error: Only one item can be moved at a time"
-    exit 1
-  end
-
-  item_query = args.first
 
   doc = load_dock_plist
 
@@ -999,6 +1030,14 @@ def main
     opts.separator "  space [-s|--small] [-a|--after <app>]               Insert space(s)"
     opts.separator ""
     opts.separator "Folder shortcuts: desktop, downloads, home, library, documents, applications, sites"
+    opts.separator ""
+    opts.separator "Examples:"
+    opts.separator "  dockedit add Safari Terminal"
+    opts.separator "  dockedit add ~/Downloads --show grid --display stack"
+    opts.separator "  dockedit add Notes --after Safari"
+    opts.separator "  dockedit space --small --after Safari"
+    opts.separator "  dockedit move --after Terminal Safari"
+    opts.separator "  dockedit move Safari --after Terminal"
     opts.separator ""
     opts.separator "Options:"
     opts.on('-h', '--help', 'Show this help') do
