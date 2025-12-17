@@ -6,6 +6,7 @@
 
 require 'rexml/document'
 require 'fileutils'
+require 'optparse'
 
 DOCK_PLIST = File.expand_path('~/Library/Preferences/com.apple.dock.plist')
 
@@ -348,26 +349,17 @@ end
 
 # Insert space subcommand
 def cmd_space(args)
-  small = false
-  after_app = nil
-
-  # Parse flags
-  while args.first&.start_with?('-')
-    flag = args.shift
-    case flag
-    when '--half', '--small', '-s'
-      small = true
-    when '--after', '-a'
-      after_app = args.shift
-      unless after_app
-        $stderr.puts "Error: --after requires an app name"
-        exit 1
-      end
-    else
-      $stderr.puts "Unknown flag: #{flag}"
-      exit 1
-    end
+  options = { small: false, after: nil }
+  
+  parser = OptionParser.new do |opts|
+    opts.banner = "Usage: dockedit space [options]"
+    opts.on('-s', '--small', '--half', 'Insert a small/half-size space') { options[:small] = true }
+    opts.on('-a', '--after APP', 'Insert after specified app (fuzzy match)') { |app| options[:after] = app }
   end
+  parser.order!(args) # order! allows flags anywhere
+  
+  small = options[:small]
+  after_app = options[:after]
 
   doc = load_dock_plist
 
@@ -403,27 +395,18 @@ end
 
 # Add app subcommand
 def cmd_add(args)
-  after_app = nil
-
-  # Parse flags
-  while args.first&.start_with?('-')
-    flag = args.shift
-    case flag
-    when '--after', '-a'
-      after_app = args.shift
-      unless after_app
-        $stderr.puts "Error: --after requires an app name"
-        exit 1
-      end
-    else
-      $stderr.puts "Unknown flag: #{flag}"
-      exit 1
-    end
+  options = { after: nil }
+  
+  parser = OptionParser.new do |opts|
+    opts.banner = "Usage: dockedit add [options] <app_name>"
+    opts.on('-a', '--after APP', 'Insert after specified app (fuzzy match)') { |app| options[:after] = app }
   end
-
+  parser.order!(args)
+  
+  after_app = options[:after]
+  
   if args.empty?
-    $stderr.puts "Usage: dockedit add [--after <app>] <app_name>"
-    $stderr.puts "Add an app to the Dock"
+    $stderr.puts parser
     exit 1
   end
 
@@ -484,9 +467,13 @@ end
 
 # Remove app subcommand
 def cmd_remove(args)
+  parser = OptionParser.new do |opts|
+    opts.banner = "Usage: dockedit remove <app_name>"
+  end
+  parser.order!(args)
+  
   if args.empty?
-    $stderr.puts "Usage: dockedit remove <app_name>"
-    $stderr.puts "Remove an app from the Dock"
+    $stderr.puts parser
     exit 1
   end
 
@@ -519,13 +506,23 @@ end
 
 # Main entry point
 def main
+  global_parser = OptionParser.new do |opts|
+    opts.banner = "Usage: dockedit <subcommand> [options] [args]"
+    opts.separator ""
+    opts.separator "Subcommands:"
+    opts.separator "  add [-a|--after <app>] <app_name>   Add an app to the Dock"
+    opts.separator "  remove <app_name>                   Remove an app from the Dock"
+    opts.separator "  space [-s|--small] [-a|--after <app>]  Insert a space in the Dock"
+    opts.separator ""
+    opts.separator "Options:"
+    opts.on('-h', '--help', 'Show this help') do
+      puts opts
+      exit 0
+    end
+  end
+
   if ARGV.empty?
-    puts "Usage: dockedit <subcommand> [options] [args]"
-    puts ""
-    puts "Subcommands:"
-    puts "  add [--after <app>] <app_name>          Add an app to the Dock"
-    puts "  remove <app_name>                       Remove an app from the Dock"
-    puts "  space [--half|--small] [--after <app>]  Insert a space in the Dock"
+    puts global_parser
     exit 0
   end
 
@@ -538,9 +535,12 @@ def main
     cmd_remove(ARGV)
   when 'space'
     cmd_space(ARGV)
+  when '-h', '--help'
+    puts global_parser
+    exit 0
   else
     $stderr.puts "Unknown subcommand: #{subcommand}"
-    $stderr.puts "Run 'dockedit' without arguments to see available subcommands"
+    $stderr.puts "Run 'dockedit --help' for usage"
     exit 1
   end
 end
