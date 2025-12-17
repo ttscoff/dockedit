@@ -9,23 +9,28 @@ require 'fileutils'
 
 DOCK_PLIST = File.expand_path('~/Library/Preferences/com.apple.dock.plist')
 
-# Fuzzy matching for app names
-def fuzzy_match?(query, target)
-  return false if target.nil? || target.empty?
+# Calculate match score (lower is better, nil means no match)
+def match_score(query, target)
+  return nil if target.nil? || target.empty?
 
   query = query.downcase
   target = target.downcase
 
-  # Exact match
-  return true if target == query
+  # Exact match - best score
+  return 0 if target == query
 
-  # Contains match
-  return true if target.include?(query)
+  # Starts with query
+  return 1 if target.start_with?(query)
+
+  # Contains match - score based on position
+  if target.include?(query)
+    return 2 + target.index(query)
+  end
 
   # Abbreviation match (e.g., "vscode" matches "Visual Studio Code")
-  # Check if query letters appear in order in target
   query_chars = query.chars
   target_pos = 0
+  matched = true
 
   query_chars.each do |char|
     found = false
@@ -37,58 +42,85 @@ def fuzzy_match?(query, target)
       end
       target_pos += 1
     end
-    return false unless found
+    unless found
+      matched = false
+      break
+    end
   end
 
-  true
+  return 100 + target.length if matched
+
+  nil
 end
 
-# Find app index in persistent-apps array
+# Fuzzy matching for app names
+def fuzzy_match?(query, target)
+  !match_score(query, target).nil?
+end
+
+# Find app index in persistent-apps array (returns best match - shortest name wins on tie)
 def find_app_index(apps_array, query)
+  best_match = nil
+  best_score = nil
+  best_name = nil
+  best_index = nil
+
   apps_array.each_with_index do |app_dict, index|
     next unless app_dict.is_a?(REXML::Element) && app_dict.name == 'dict'
 
-    tile_data = nil
-    in_tile_data = false
-
-    app_dict.elements.each do |elem|
-      if elem.name == 'key' && elem.text == 'tile-data'
-        in_tile_data = true
-        next
-      end
-
-      if in_tile_data && elem.name == 'dict'
-        tile_data = elem
-        break
-      end
-    end
-
+    tile_data = get_tile_data(app_dict)
     next unless tile_data
 
-    file_label = nil
-    bundle_id = nil
-    current_key = nil
+    file_label = get_tile_value(tile_data, 'file-label')
+    bundle_id = get_tile_value(tile_data, 'bundle-identifier')
 
-    tile_data.elements.each do |elem|
-      if elem.name == 'key'
-        current_key = elem.text
-      elsif elem.name == 'string' && current_key
-        case current_key
-        when 'file-label'
-          file_label = elem.text
-        when 'bundle-identifier'
-          bundle_id = elem.text
-        end
-        current_key = nil
-      end
-    end
+    label_score = match_score(query, file_label)
+    bundle_score = match_score(query, bundle_id)
 
-    if fuzzy_match?(query, file_label) || fuzzy_match?(query, bundle_id)
-      return index, file_label || bundle_id
+    # Use the better of the two scores
+    current_score = [label_score, bundle_score].compact.min
+    next unless current_score
+
+    name = file_label || bundle_id
+    name_length = name&.length || 999
+
+    # Prefer lower score, then shorter name
+    if best_score.nil? || current_score < best_score ||
+       (current_score == best_score && name_length < (best_name&.length || 999))
+      best_score = current_score
+      best_name = name
+      best_index = index
     end
   end
 
-  [nil, nil]
+  [best_index, best_name]
+end
+
+# Get tile-data dict from app dict
+def get_tile_data(app_dict)
+  current_key = nil
+  app_dict.elements.each do |elem|
+    if elem.name == 'key'
+      current_key = elem.text
+    elsif elem.name == 'dict' && current_key == 'tile-data'
+      return elem
+    end
+  end
+  nil
+end
+
+# Get a string value from tile-data
+def get_tile_value(tile_data, key_name)
+  current_key = nil
+  tile_data.elements.each do |elem|
+    if elem.name == 'key'
+      current_key = elem.text
+    elsif current_key == key_name
+      return elem.text if elem.name == 'string'
+      return nil
+    end
+  end
+  nil
 end
 
 # Create a spacer tile element
@@ -138,9 +170,186 @@ def get_persistent_apps(doc)
   nil
 end
 
+# Find app on disk using mdfind
+def find_app_on_disk(query)
+  # Search in /Applications and /System/Applications
+  result = `mdfind -onlyin /Applications -onlyin /System/Applications 'kMDItemKind == "Application" && kMDItemDisplayName == "*#{query}*"cd' 2>/dev/null`.strip
+
+  if result.empty?
+    # Fallback to filename search
+    result = `mdfind -onlyin /Applications -onlyin /System/Applications 'kMDItemFSName == "*#{query}*.app"cd' 2>/dev/null`.strip
+  end
+
+  return nil if result.empty?
+
+  apps = result.split("\n").select { |p| p.end_with?('.app') }
+  return nil if apps.empty?
+
+  # Score and sort by best match (shortest name wins on equal score)
+  scored = apps.map do |path|
+    name = File.basename(path, '.app')
+    score = match_score(query, name)
+    [path, name, score || 999, name.length]
+  end
+
+  # Sort by score, then by name length
+  scored.sort_by! { |_, _, score, len| [score, len] }
+
+  scored.first&.first
+end
+
+# Read Info.plist from an app bundle
+def read_app_info(app_path)
+  info_plist = File.join(app_path, 'Contents', 'Info.plist')
+  return nil unless File.exist?(info_plist)
+
+  # Convert to XML and read
+  temp_plist = "/tmp/dockedit_info_#{$$}.plist"
+  FileUtils.cp(info_plist, temp_plist)
+  system("plutil -convert xml1 '#{temp_plist}' 2>/dev/null")
+
+  content = File.read(temp_plist)
+  File.delete(temp_plist) if File.exist?(temp_plist)
+
+  doc = REXML::Document.new(content)
+  root_dict = doc.root.elements['dict']
+  return nil unless root_dict
+
+  info = {}
+  current_key = nil
+
+  root_dict.elements.each do |elem|
+    if elem.name == 'key'
+      current_key = elem.text
+    elsif current_key
+      case elem.name
+      when 'string'
+        info[current_key] = elem.text
+      when 'array'
+        # For arrays, get first string element
+        first_string = elem.elements['string']
+        info[current_key] = first_string.text if first_string
+      end
+      current_key = nil
+    end
+  end
+
+  info
+end
+
+# Create an app tile element
+def create_app_tile(app_path, app_info)
+  app_dict = REXML::Element.new('dict')
+
+  # tile-data key
+  td_key = REXML::Element.new('key')
+  td_key.text = 'tile-data'
+  app_dict.add(td_key)
+
+  # tile-data dict
+  tile_data = REXML::Element.new('dict')
+
+  # bundle-identifier
+  add_plist_key_value(tile_data, 'bundle-identifier', 'string', app_info['CFBundleIdentifier'])
+
+  # dock-extra
+  add_plist_key_value(tile_data, 'dock-extra', 'false', nil)
+
+  # file-data dict
+  fd_key = REXML::Element.new('key')
+  fd_key.text = 'file-data'
+  tile_data.add(fd_key)
+
+  file_data = REXML::Element.new('dict')
+  add_plist_key_value(file_data, '_CFURLString', 'string', "file://#{app_path}/")
+  add_plist_key_value(file_data, '_CFURLStringType', 'integer', '15')
+  tile_data.add(file_data)
+
+  # file-label
+  label = app_info['CFBundleName'] || app_info['CFBundleDisplayName'] || File.basename(app_path, '.app')
+  add_plist_key_value(tile_data, 'file-label', 'string', label)
+
+  # file-mod-date
+  add_plist_key_value(tile_data, 'file-mod-date', 'integer', '0')
+
+  # file-type
+  add_plist_key_value(tile_data, 'file-type', 'integer', '41')
+
+  # is-beta
+  add_plist_key_value(tile_data, 'is-beta', 'false', nil)
+
+  # parent-mod-date
+  add_plist_key_value(tile_data, 'parent-mod-date', 'integer', '0')
+
+  app_dict.add(tile_data)
+
+  # tile-type key
+  tt_key = REXML::Element.new('key')
+  tt_key.text = 'tile-type'
+  app_dict.add(tt_key)
+
+  tt_value = REXML::Element.new('string')
+  tt_value.text = 'file-tile'
+  app_dict.add(tt_value)
+
+  app_dict
+end
+
+# Helper to add key/value pair to plist dict
+def add_plist_key_value(dict, key_name, value_type, value)
+  key = REXML::Element.new('key')
+  key.text = key_name
+  dict.add(key)
+
+  val_elem = REXML::Element.new(value_type)
+  val_elem.text = value if value
+  dict.add(val_elem)
+end
+
+# Write plist and restart dock
+def write_plist_and_restart(doc, success_message)
+  formatter = REXML::Formatters::Pretty.new(2)
+  formatter.compact = true
+
+  output = StringIO.new
+  output << %{<?xml version="1.0" encoding="UTF-8"?>\n}
+  output << %{<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n}
+  formatter.write(doc.root, output)
+  output << "\n"
+
+  begin
+    File.write(DOCK_PLIST, output.string)
+  rescue => e
+    $stderr.puts "Error: Failure to update Dock plist - #{e.message}"
+    exit 1
+  end
+
+  # Convert back to binary and restart Dock
+  unless system("plutil -convert binary1 '#{DOCK_PLIST}' 2>/dev/null")
+    $stderr.puts "Error: Failure to update Dock plist"
+    exit 1
+  end
+
+  system('killall Dock')
+  puts success_message
+  exit 0
+end
+
+# Load and parse dock plist
+def load_dock_plist
+  unless system("plutil -convert xml1 '#{DOCK_PLIST}' 2>/dev/null")
+    $stderr.puts "Error: Failed to convert Dock plist to XML"
+    exit 1
+  end
+
+  plist_content = File.read(DOCK_PLIST)
+  REXML::Document.new(plist_content)
+end
+
 # Insert space subcommand
 def cmd_space(args)
   small = false
+  after_app = nil
 
   # Parse flags
   while args.first&.start_with?('-')
@@ -148,30 +357,19 @@ def cmd_space(args)
     case flag
     when '--half', '--small', '-s'
       small = true
+    when '--after', '-a'
+      after_app = args.shift
+      unless after_app
+        $stderr.puts "Error: --after requires an app name"
+        exit 1
+      end
     else
       $stderr.puts "Unknown flag: #{flag}"
       exit 1
     end
   end
 
-  if args.length < 2
-    $stderr.puts "Usage: dockedit space [--half|--small] <app1> <app2>"
-    $stderr.puts "Insert a space between two adjacent apps in the Dock"
-    exit 1
-  end
-
-  app1_query = args[0]
-  app2_query = args[1]
-
-  # Convert plist to XML
-  unless system("plutil -convert xml1 '#{DOCK_PLIST}' 2>/dev/null")
-    $stderr.puts "Error: Failed to convert Dock plist to XML"
-    exit 1
-  end
-
-  # Read and parse the plist
-  plist_content = File.read(DOCK_PLIST)
-  doc = REXML::Document.new(plist_content)
+  doc = load_dock_plist
 
   apps_array = get_persistent_apps(doc)
   unless apps_array
@@ -182,57 +380,141 @@ def cmd_space(args)
   # Get array of dict elements only
   app_dicts = apps_array.elements.to_a.select { |e| e.is_a?(REXML::Element) && e.name == 'dict' }
 
-  # Find both apps
-  index1, name1 = find_app_index(app_dicts, app1_query)
-  index2, name2 = find_app_index(app_dicts, app2_query)
-
-  unless index1
-    $stderr.puts "Error: Could not find app matching '#{app1_query}'"
-    exit 1
-  end
-
-  unless index2
-    $stderr.puts "Error: Could not find app matching '#{app2_query}'"
-    exit 1
-  end
-
-  # Check if adjacent
-  unless (index1 - index2).abs == 1
-    $stderr.puts "Error: Apps must be adjacent"
-    $stderr.puts "  '#{name1}' is at position #{index1 + 1}"
-    $stderr.puts "  '#{name2}' is at position #{index2 + 1}"
-    exit 1
-  end
-
-  # Determine insertion point (after the first app in order)
-  insert_after_index = [index1, index2].min
-  insert_after_element = app_dicts[insert_after_index]
-
   # Create spacer tile
   spacer = create_spacer_tile(small: small)
+  spacer_type = small ? 'Small space' : 'Space'
 
-  # Insert spacer after the first app
-  apps_array.insert_after(insert_after_element, spacer)
+  if after_app
+    # Find the app to insert after
+    index, name = find_app_index(app_dicts, after_app)
+    unless index
+      $stderr.puts "Error: App '#{after_app}' not found in Dock"
+      exit 1
+    end
 
-  # Write back to file
-  formatter = REXML::Formatters::Pretty.new(2)
-  formatter.compact = true
+    apps_array.insert_after(app_dicts[index], spacer)
+    write_plist_and_restart(doc, "#{spacer_type} inserted after '#{name}'.")
+  else
+    # Add at end
+    apps_array.add(spacer)
+    write_plist_and_restart(doc, "#{spacer_type} added to end of Dock.")
+  end
+end
 
-  output = StringIO.new
-  output << %{<?xml version="1.0" encoding="UTF-8"?>\n}
-  output << %{<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n}
-  formatter.write(doc.root, output)
-  output << "\n"
+# Add app subcommand
+def cmd_add(args)
+  after_app = nil
 
-  File.write(DOCK_PLIST, output.string)
+  # Parse flags
+  while args.first&.start_with?('-')
+    flag = args.shift
+    case flag
+    when '--after', '-a'
+      after_app = args.shift
+      unless after_app
+        $stderr.puts "Error: --after requires an app name"
+        exit 1
+      end
+    else
+      $stderr.puts "Unknown flag: #{flag}"
+      exit 1
+    end
+  end
 
-  # Convert back to binary and restart Dock
-  system("plutil -convert binary1 '#{DOCK_PLIST}' 2>/dev/null")
-  system('killall Dock')
+  if args.empty?
+    $stderr.puts "Usage: dockedit add [--after <app>] <app_name>"
+    $stderr.puts "Add an app to the Dock"
+    exit 1
+  end
 
-  spacer_type = small ? 'small space' : 'space'
-  puts "#{spacer_type.capitalize} inserted between '#{name1}' and '#{name2}'."
-  exit 0
+  app_query = args.join(' ')
+
+  # Find the app on disk
+  app_path = find_app_on_disk(app_query)
+  unless app_path
+    $stderr.puts "Error: App '#{app_query}' not found"
+    exit 1
+  end
+
+  # Read app info
+  app_info = read_app_info(app_path)
+  unless app_info && app_info['CFBundleIdentifier']
+    $stderr.puts "Error: Could not read app info from '#{app_path}'"
+    exit 1
+  end
+
+  app_name = app_info['CFBundleName'] || app_info['CFBundleDisplayName'] || File.basename(app_path, '.app')
+
+  doc = load_dock_plist
+
+  apps_array = get_persistent_apps(doc)
+  unless apps_array
+    $stderr.puts "Error: Could not find persistent-apps in Dock plist"
+    exit 1
+  end
+
+  # Check if app is already in dock
+  app_dicts = apps_array.elements.to_a.select { |e| e.is_a?(REXML::Element) && e.name == 'dict' }
+  existing_index, existing_name = find_app_index(app_dicts, app_info['CFBundleIdentifier'])
+
+  if existing_index
+    $stderr.puts "Error: '#{existing_name}' is already in the Dock"
+    exit 1
+  end
+
+  # Create the app tile
+  app_tile = create_app_tile(app_path, app_info)
+
+  if after_app
+    # Find the app to insert after
+    after_index, after_name = find_app_index(app_dicts, after_app)
+    unless after_index
+      $stderr.puts "Error: App '#{after_app}' not found in Dock"
+      exit 1
+    end
+
+    apps_array.insert_after(app_dicts[after_index], app_tile)
+    write_plist_and_restart(doc, "'#{app_name}' added to Dock after '#{after_name}'.")
+  else
+    # Add at end
+    apps_array.add(app_tile)
+    write_plist_and_restart(doc, "'#{app_name}' added to Dock.")
+  end
+end
+
+# Remove app subcommand
+def cmd_remove(args)
+  if args.empty?
+    $stderr.puts "Usage: dockedit remove <app_name>"
+    $stderr.puts "Remove an app from the Dock"
+    exit 1
+  end
+
+  app_query = args.join(' ')
+
+  doc = load_dock_plist
+
+  apps_array = get_persistent_apps(doc)
+  unless apps_array
+    $stderr.puts "Error: Could not find persistent-apps in Dock plist"
+    exit 1
+  end
+
+  # Get array of dict elements only
+  app_dicts = apps_array.elements.to_a.select { |e| e.is_a?(REXML::Element) && e.name == 'dict' }
+
+  # Find the app
+  index, name = find_app_index(app_dicts, app_query)
+
+  unless index
+    $stderr.puts "Error: App '#{app_query}' not found in Dock"
+    exit 1
+  end
+
+  # Remove the app from the array
+  apps_array.delete(app_dicts[index])
+
+  write_plist_and_restart(doc, "'#{name}' removed from Dock.")
 end
 
 # Main entry point
@@ -241,13 +523,19 @@ def main
     puts "Usage: dockedit <subcommand> [options] [args]"
     puts ""
     puts "Subcommands:"
-    puts "  space [--half|--small] <app1> <app2>  Insert a space between two adjacent apps"
+    puts "  add [--after <app>] <app_name>          Add an app to the Dock"
+    puts "  remove <app_name>                       Remove an app from the Dock"
+    puts "  space [--half|--small] [--after <app>]  Insert a space in the Dock"
     exit 0
   end
 
   subcommand = ARGV.shift
 
   case subcommand
+  when 'add'
+    cmd_add(ARGV)
+  when 'remove'
+    cmd_remove(ARGV)
   when 'space'
     cmd_space(ARGV)
   else
