@@ -9,6 +9,8 @@ jobs:
   release:
     name: Create Release and Publish to RubyGems
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
 
     steps:
       - name: Checkout code
@@ -46,8 +48,6 @@ jobs:
           generate_release_notes: true
           draft: false
           prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Publish to RubyGems
         run: |

@@ -139,8 +139,8 @@ task :release, [:level] do |_t, args|
   # Generate changelog commit message
   puts 'Generating commit message from changelog...'
 
-  # Run changelog command to get commit message
-  changelog_output = `changelog 2>&1`
+  # Run changelog command to get commit message (only stdout, not stderr)
+  changelog_output = `changelog 2>/dev/null`
   changelog_success = $?.success?
 
   # Use changelog output, with fallback if it fails or produces no output
