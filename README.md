@@ -259,4 +259,9 @@ dockedit --version
 
 Prints the current `dockedit` version (from `DockEdit::VERSION`).
 
+---
+
+## Related Projects
+
+- [DockUtil](https://github.com/kcrawford/dockutil) - A more complete dock editing utility written in Swift
 
