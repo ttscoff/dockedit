@@ -1,3 +1,11 @@
+### 1.0.6
+
+2025-12-17 07:53
+
+#### FIXED
+
+- Environment variable mismatch in release action
+
 ### 1.0.5
 
 2025-12-17 07:50
