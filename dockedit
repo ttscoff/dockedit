@@ -7,8 +7,34 @@
 require 'rexml/document'
 require 'fileutils'
 require 'optparse'
+require 'uri'
 
 DOCK_PLIST = File.expand_path('~/Library/Preferences/com.apple.dock.plist')
+
+# Path shortcuts for folders
+PATH_SHORTCUTS = {
+  /^desktop$/i => File.expand_path('~/Desktop'),
+  /^downloads$/i => File.expand_path('~/Downloads'),
+  /^(home|~)$/i => File.expand_path('~'),
+  /^library$/i => File.expand_path('~/Library'),
+  /^documents$/i => File.expand_path('~/Documents'),
+  /^(applications|apps)$/i => '/Applications',
+  /^sites$/i => File.expand_path('~/Sites')
+}.freeze
+
+# Show-as values for folder display
+SHOW_AS_VALUES = {
+  'f' => 1, 'fan' => 1,
+  'g' => 2, 'grid' => 2,
+  'l' => 3, 'list' => 3,
+  'a' => 4, 'auto' => 4
+}.freeze
+
+# Display-as values for folder appearance
+DISPLAY_AS_VALUES = {
+  's' => 0, 'stack' => 0,
+  'f' => 1, 'folder' => 1
+}.freeze
 
 # Calculate match score (lower is better, nil means no match)
 def match_score(query, target)
@@ -59,33 +85,44 @@ def fuzzy_match?(query, target)
   !match_score(query, target).nil?
 end
 
-# Find app index in persistent-apps array (returns best match - shortest name wins on tie)
-def find_app_index(apps_array, query)
-  best_match = nil
+# Find item index in a dock array (persistent-apps or persistent-others)
+# For folders, also checks file-data._CFURLString
+def find_item_index(items_array, query, check_url: false)
   best_score = nil
   best_name = nil
   best_index = nil
 
-  apps_array.each_with_index do |app_dict, index|
-    next unless app_dict.is_a?(REXML::Element) && app_dict.name == 'dict'
+  items_array.each_with_index do |item_dict, index|
+    next unless item_dict.is_a?(REXML::Element) && item_dict.name == 'dict'
 
-    tile_data = get_tile_data(app_dict)
+    tile_data = get_tile_data(item_dict)
     next unless tile_data
 
     file_label = get_tile_value(tile_data, 'file-label')
     bundle_id = get_tile_value(tile_data, 'bundle-identifier')
 
-    label_score = match_score(query, file_label)
-    bundle_score = match_score(query, bundle_id)
+    scores = []
+    scores << match_score(query, file_label)
+    scores << match_score(query, bundle_id)
 
-    # Use the better of the two scores
-    current_score = [label_score, bundle_score].compact.min
+    # For folders, also check URL path
+    if check_url
+      url_string = get_file_data_url(tile_data)
+      if url_string
+        # Extract path from file:// URL and decode
+        path = URI.decode_www_form_component(url_string.sub(%r{^file://}, '').chomp('/'))
+        basename = File.basename(path)
+        scores << match_score(query, path)
+        scores << match_score(query, basename)
+      end
+    end
+
+    current_score = scores.compact.min
     next unless current_score
 
-    name = file_label || bundle_id
-    name_length = name&.length || 999
+    name = file_label || bundle_id || 'Unknown'
+    name_length = name.length
 
-    # Prefer lower score, then shorter name
     if best_score.nil? || current_score < best_score ||
        (current_score == best_score && name_length < (best_name&.length || 999))
       best_score = current_score
@@ -95,6 +132,11 @@ def find_app_index(apps_array, query)
   end
 
   [best_index, best_name]
+end
+
+# Alias for backward compatibility
+def find_app_index(apps_array, query)
+  find_item_index(apps_array, query, check_url: false)
 end
 
 # Get tile-data dict from app dict
@@ -119,6 +161,19 @@ def get_tile_value(tile_data, key_name)
     elsif current_key == key_name
       return elem.text if elem.name == 'string'
       return nil
+    end
+  end
+  nil
+end
+
+# Get _CFURLString from file-data dict
+def get_file_data_url(tile_data)
+  current_key = nil
+  tile_data.elements.each do |elem|
+    if elem.name == 'key'
+      current_key = elem.text
+    elsif elem.name == 'dict' && current_key == 'file-data'
+      return get_tile_value(elem, '_CFURLString')
     end
   end
   nil
@@ -156,6 +211,16 @@ end
 
 # Get the persistent-apps array from the plist
 def get_persistent_apps(doc)
+  get_plist_array(doc, 'persistent-apps')
+end
+
+# Get the persistent-others array from the plist
+def get_persistent_others(doc)
+  get_plist_array(doc, 'persistent-others')
+end
+
+# Get a named array from the plist root dict
+def get_plist_array(doc, array_name)
   root_dict = doc.root.elements['dict']
   return nil unless root_dict
 
@@ -163,12 +228,32 @@ def get_persistent_apps(doc)
   root_dict.elements.each do |elem|
     if elem.name == 'key'
       current_key = elem.text
-    elsif elem.name == 'array' && current_key == 'persistent-apps'
+    elsif elem.name == 'array' && current_key == array_name
       return elem
     end
   end
 
   nil
+end
+
+# Expand path shortcuts
+def expand_path_shortcut(path)
+  PATH_SHORTCUTS.each do |pattern, expanded|
+    return expanded if path.match?(pattern)
+  end
+  # Not a shortcut, expand ~ and return
+  File.expand_path(path).chomp('/')
+end
+
+# Check if path is a folder (not an app)
+def folder_path?(path)
+  expanded = expand_path_shortcut(path)
+  File.directory?(expanded) && !expanded.end_with?('.app')
+end
+
+# Check if path is an explicit app path
+def explicit_app_path?(path)
+  path.end_with?('.app') && path.include?('/')
 end
 
 # Find app on disk using mdfind
@@ -262,7 +347,7 @@ def create_app_tile(app_path, app_info)
   tile_data.add(fd_key)
 
   file_data = REXML::Element.new('dict')
-  add_plist_key_value(file_data, '_CFURLString', 'string', "file://#{app_path}/")
+  add_plist_key_value(file_data, '_CFURLString', 'string', "file://#{URI.encode_www_form_component(app_path).gsub('%2F', '/')}/")
   add_plist_key_value(file_data, '_CFURLStringType', 'integer', '15')
   tile_data.add(file_data)
 
@@ -294,6 +379,68 @@ def create_app_tile(app_path, app_info)
   app_dict.add(tt_value)
 
   app_dict
+end
+
+# Create a folder tile element
+def create_folder_tile(folder_path, show_as: 4, display_as: 1)
+  folder_dict = REXML::Element.new('dict')
+
+  # tile-data key
+  td_key = REXML::Element.new('key')
+  td_key.text = 'tile-data'
+  folder_dict.add(td_key)
+
+  # tile-data dict
+  tile_data = REXML::Element.new('dict')
+
+  # arrangement (0 = by name)
+  add_plist_key_value(tile_data, 'arrangement', 'integer', '0')
+
+  # displayas (0 = stack, 1 = folder)
+  add_plist_key_value(tile_data, 'displayas', 'integer', display_as.to_s)
+
+  # file-data dict
+  fd_key = REXML::Element.new('key')
+  fd_key.text = 'file-data'
+  tile_data.add(fd_key)
+
+  file_data = REXML::Element.new('dict')
+  encoded_path = URI.encode_www_form_component(folder_path).gsub('%2F', '/')
+  add_plist_key_value(file_data, '_CFURLString', 'string', "file://#{encoded_path}/")
+  add_plist_key_value(file_data, '_CFURLStringType', 'integer', '15')
+  tile_data.add(file_data)
+
+  # file-label
+  label = File.basename(folder_path)
+  add_plist_key_value(tile_data, 'file-label', 'string', label)
+
+  # file-mod-date
+  add_plist_key_value(tile_data, 'file-mod-date', 'integer', '0')
+
+  # file-type
+  add_plist_key_value(tile_data, 'file-type', 'integer', '2')
+
+  # parent-mod-date
+  add_plist_key_value(tile_data, 'parent-mod-date', 'integer', '0')
+
+  # preferreditemsize (-1 = default)
+  add_plist_key_value(tile_data, 'preferreditemsize', 'integer', '-1')
+
+  # showas (1=fan, 2=grid, 3=list, 4=auto)
+  add_plist_key_value(tile_data, 'showas', 'integer', show_as.to_s)
+
+  folder_dict.add(tile_data)
+
+  # tile-type key
+  tt_key = REXML::Element.new('key')
+  tt_key.text = 'tile-type'
+  folder_dict.add(tt_key)
+
+  tt_value = REXML::Element.new('string')
+  tt_value.text = 'directory-tile'
+  folder_dict.add(tt_value)
+
+  folder_dict
 end
 
 # Helper to add key/value pair to plist dict
@@ -350,6 +497,42 @@ def load_dock_plist
   REXML::Document.new(plist_content)
 end
 
+# Parse show-as argument
+def parse_show_as(value)
+  return nil if value.nil?
+
+  key = value.downcase
+  SHOW_AS_VALUES[key] || 4
+end
+
+# Get human-readable name for show-as value
+def show_as_name(value)
+  case value
+  when 1 then 'fan'
+  when 2 then 'grid'
+  when 3 then 'list'
+  when 4 then 'auto'
+  else 'auto'
+  end
+end
+
+# Parse display-as argument
+def parse_display_as(value)
+  return nil if value.nil?
+
+  key = value.downcase
+  DISPLAY_AS_VALUES[key]
+end
+
+# Get human-readable name for display-as value
+def display_as_name(value)
+  case value
+  when 0 then 'stack'
+  when 1 then 'folder'
+  else 'stack'
+  end
+end
+
 # Insert space subcommand
 def cmd_space(args)
   options = { small: false, after: [] }
@@ -401,17 +584,52 @@ def cmd_space(args)
   write_plist_and_restart(doc, messages)
 end
 
-# Add app subcommand
+# Update showas value for an existing folder tile
+def update_folder_showas(folder_dict, show_as)
+  update_folder_integer_key(folder_dict, 'showas', show_as)
+end
+
+# Update displayas value for an existing folder tile
+def update_folder_displayas(folder_dict, display_as)
+  update_folder_integer_key(folder_dict, 'displayas', display_as)
+end
+
+# Update an integer key in folder tile-data
+def update_folder_integer_key(folder_dict, key_name, value)
+  tile_data = get_tile_data(folder_dict)
+  return false unless tile_data
+
+  # Find and update the key
+  current_key = nil
+  tile_data.elements.each do |elem|
+    if elem.name == 'key' && elem.text == key_name
+      current_key = elem
+    elsif current_key && elem.name == 'integer'
+      elem.text = value.to_s
+      return true
+    end
+  end
+
+  # If key doesn't exist, add it
+  add_plist_key_value(tile_data, key_name, 'integer', value.to_s)
+  true
+end
+
+# Add app/folder subcommand
 def cmd_add(args)
-  options = { after: nil }
+  options = { after: nil, show_as: nil, display_as: nil }
 
   parser = OptionParser.new do |opts|
-    opts.banner = "Usage: dockedit add [options] <app_name> [app_name...]"
-    opts.on('-a', '--after APP', 'Insert after specified app (fuzzy match)') { |app| options[:after] = app }
+    opts.banner = "Usage: dockedit add [options] <app_or_folder> [...]"
+    opts.on('-a', '--after ITEM', 'Insert after specified app/folder (fuzzy match)') { |app| options[:after] = app }
+    opts.on('--show TYPE', '--view TYPE', 'Folder view: fan/f, grid/g, list/l, auto/a (default: auto)') { |t| options[:show_as] = parse_show_as(t) }
+    opts.on('--display TYPE', 'Folder style: folder/f, stack/s (default: folder)') { |t| options[:display_as] = parse_display_as(t) }
   end
-  parser.order!(args)
+  parser.permute!(args)
 
-  after_app = options[:after]
+  after_target = options[:after]
+  show_as = options[:show_as]
+  display_as = options[:display_as]
 
   if args.empty?
     $stderr.puts parser
@@ -421,79 +639,178 @@ def cmd_add(args)
   doc = load_dock_plist
 
   apps_array = get_persistent_apps(doc)
-  unless apps_array
-    $stderr.puts "Error: Could not find persistent-apps in Dock plist"
+  others_array = get_persistent_others(doc)
+
+  unless apps_array && others_array
+    $stderr.puts "Error: Could not find dock arrays in plist"
     exit 1
   end
 
   messages = []
-  last_inserted_element = nil
+  last_inserted_app_element = nil
+  last_inserted_folder_element = nil
 
   # Find initial insertion point if --after specified
-  if after_app
+  if after_target
+    # First check persistent-apps
     app_dicts = apps_array.elements.to_a.select { |e| e.is_a?(REXML::Element) && e.name == 'dict' }
-    after_index, after_name = find_app_index(app_dicts, after_app)
-    unless after_index
-      $stderr.puts "Error: App '#{after_app}' not found in Dock"
-      exit 1
+    after_index, _after_name = find_app_index(app_dicts, after_target)
+
+    if after_index
+      last_inserted_app_element = app_dicts[after_index]
+    else
+      # Check persistent-others (folders)
+      folder_dicts = others_array.elements.to_a.select { |e| e.is_a?(REXML::Element) && e.name == 'dict' }
+      after_index, _after_name = find_item_index(folder_dicts, after_target, check_url: true)
+
+      if after_index
+        last_inserted_folder_element = folder_dicts[after_index]
+      else
+        $stderr.puts "Error: '#{after_target}' not found in Dock"
+        exit 1
+      end
     end
-    last_inserted_element = app_dicts[after_index]
   end
 
-  # Process each app argument
-  args.each do |app_query|
-    # Find the app on disk
-    app_path = find_app_on_disk(app_query)
-    unless app_path
-      $stderr.puts "Error: App '#{app_query}' not found"
-      exit 1
-    end
+  # Process each argument
+  args.each do |item_query|
+    # Determine if this is a folder or app
+    if folder_path?(item_query)
+      # It's a folder
+      folder_path = expand_path_shortcut(item_query)
 
-    # Read app info
-    app_info = read_app_info(app_path)
-    unless app_info && app_info['CFBundleIdentifier']
-      $stderr.puts "Error: Could not read app info from '#{app_path}'"
-      exit 1
-    end
+      unless File.directory?(folder_path)
+        $stderr.puts "Error: Folder '#{folder_path}' not found"
+        exit 1
+      end
 
-    app_name = app_info['CFBundleName'] || app_info['CFBundleDisplayName'] || File.basename(app_path, '.app')
+      folder_name = File.basename(folder_path)
 
-    # Check if app is already in dock
-    app_dicts = apps_array.elements.to_a.select { |e| e.is_a?(REXML::Element) && e.name == 'dict' }
-    existing_index, existing_name = find_app_index(app_dicts, app_info['CFBundleIdentifier'])
+      # Check if folder is already in dock
+      folder_dicts = others_array.elements.to_a.select { |e| e.is_a?(REXML::Element) && e.name == 'dict' }
+      existing_index, existing_name = find_item_index(folder_dicts, folder_path, check_url: true)
 
-    if existing_index
-      $stderr.puts "Warning: '#{existing_name}' is already in the Dock, skipping"
-      next
-    end
+      if existing_index
+        # If show_as or display_as was specified, update the existing folder
+        updates = []
+        if show_as
+          update_folder_showas(folder_dicts[existing_index], show_as)
+          updates << "view=#{show_as_name(show_as)}"
+        end
+        if display_as
+          update_folder_displayas(folder_dicts[existing_index], display_as)
+          updates << "style=#{display_as_name(display_as)}"
+        end
 
-    # Create the app tile
-    app_tile = create_app_tile(app_path, app_info)
+        if updates.any?
+          messages << "'#{existing_name}' updated (#{updates.join(', ')})."
+        else
+          $stderr.puts "Warning: '#{existing_name}' is already in the Dock, skipping"
+        end
+        next
+      end
 
-    if last_inserted_element
-      # Insert after the last inserted element (maintains order)
-      apps_array.insert_after(last_inserted_element, app_tile)
+      # Create the folder tile (use defaults if not specified)
+      folder_tile = create_folder_tile(folder_path, show_as: show_as || 4, display_as: display_as || 1)
+
+      if last_inserted_folder_element
+        others_array.insert_after(last_inserted_folder_element, folder_tile)
+      else
+        others_array.add(folder_tile)
+      end
+
+      last_inserted_folder_element = folder_tile
+      messages << "'#{folder_name}' folder added to Dock."
+
+    elsif explicit_app_path?(item_query)
+      # Explicit app path given
+      app_path = File.expand_path(item_query)
+
+      unless File.exist?(File.join(app_path, 'Contents', 'Info.plist'))
+        $stderr.puts "Error: Application path '#{app_path}' not found"
+        exit 1
+      end
+
+      app_info = read_app_info(app_path)
+      unless app_info && app_info['CFBundleIdentifier']
+        $stderr.puts "Error: Could not read app info from '#{app_path}'"
+        exit 1
+      end
+
+      app_name = app_info['CFBundleName'] || app_info['CFBundleDisplayName'] || File.basename(app_path, '.app')
+
+      # Check if app is already in dock
+      app_dicts = apps_array.elements.to_a.select { |e| e.is_a?(REXML::Element) && e.name == 'dict' }
+      existing_index, existing_name = find_app_index(app_dicts, app_info['CFBundleIdentifier'])
+
+      if existing_index
+        $stderr.puts "Warning: '#{existing_name}' is already in the Dock, skipping"
+        next
+      end
+
+      # Create the app tile
+      app_tile = create_app_tile(app_path, app_info)
+
+      if last_inserted_app_element
+        apps_array.insert_after(last_inserted_app_element, app_tile)
+        last_inserted_app_element = app_tile
+      else
+        apps_array.add(app_tile)
+      end
+
       messages << "'#{app_name}' added to Dock."
-      last_inserted_element = app_tile
+
     else
-      # Add at end
-      apps_array.add(app_tile)
+      # Search for app by name
+      app_path = find_app_on_disk(item_query)
+      unless app_path
+        $stderr.puts "Error: App '#{item_query}' not found"
+        exit 1
+      end
+
+      app_info = read_app_info(app_path)
+      unless app_info && app_info['CFBundleIdentifier']
+        $stderr.puts "Error: Could not read app info from '#{app_path}'"
+        exit 1
+      end
+
+      app_name = app_info['CFBundleName'] || app_info['CFBundleDisplayName'] || File.basename(app_path, '.app')
+
+      # Check if app is already in dock
+      app_dicts = apps_array.elements.to_a.select { |e| e.is_a?(REXML::Element) && e.name == 'dict' }
+      existing_index, existing_name = find_app_index(app_dicts, app_info['CFBundleIdentifier'])
+
+      if existing_index
+        $stderr.puts "Warning: '#{existing_name}' is already in the Dock, skipping"
+        next
+      end
+
+      # Create the app tile
+      app_tile = create_app_tile(app_path, app_info)
+
+      if last_inserted_app_element
+        apps_array.insert_after(last_inserted_app_element, app_tile)
+        last_inserted_app_element = app_tile
+      else
+        apps_array.add(app_tile)
+      end
+
       messages << "'#{app_name}' added to Dock."
     end
   end
 
   if messages.empty?
-    $stderr.puts "No apps were added to the Dock"
+    $stderr.puts "No items were added to the Dock"
     exit 1
   end
 
   write_plist_and_restart(doc, messages)
 end
 
-# Remove app subcommand
+# Remove app/folder subcommand
 def cmd_remove(args)
   parser = OptionParser.new do |opts|
-    opts.banner = "Usage: dockedit remove <app_name> [app_name...]"
+    opts.banner = "Usage: dockedit remove <app_or_folder> [...]"
   end
   parser.order!(args)
 
@@ -505,33 +822,51 @@ def cmd_remove(args)
   doc = load_dock_plist
 
   apps_array = get_persistent_apps(doc)
-  unless apps_array
-    $stderr.puts "Error: Could not find persistent-apps in Dock plist"
+  others_array = get_persistent_others(doc)
+
+  unless apps_array && others_array
+    $stderr.puts "Error: Could not find dock arrays in plist"
     exit 1
   end
 
   messages = []
 
-  # Process each app argument
-  args.each do |app_query|
-    # Re-fetch app_dicts each time since array changes after delete
+  # Process each argument
+  args.each do |item_query|
+    found = false
+
+    # Determine if this looks like a path
+    is_path = item_query.include?('/')
+
+    # First check persistent-apps
     app_dicts = apps_array.elements.to_a.select { |e| e.is_a?(REXML::Element) && e.name == 'dict' }
+    index, name = find_app_index(app_dicts, item_query)
 
-    # Find the app
-    index, name = find_app_index(app_dicts, app_query)
-
-    unless index
-      $stderr.puts "Warning: App '#{app_query}' not found in Dock, skipping"
-      next
+    if index
+      apps_array.delete(app_dicts[index])
+      messages << "'#{name}' removed from Dock."
+      found = true
     end
 
-    # Remove the app from the array
-    apps_array.delete(app_dicts[index])
-    messages << "'#{name}' removed from Dock."
+    # If not found in apps, check persistent-others (folders)
+    unless found
+      folder_dicts = others_array.elements.to_a.select { |e| e.is_a?(REXML::Element) && e.name == 'dict' }
+      index, name = find_item_index(folder_dicts, item_query, check_url: is_path)
+
+      if index
+        others_array.delete(folder_dicts[index])
+        messages << "'#{name}' removed from Dock."
+        found = true
+      end
+    end
+
+    unless found
+      $stderr.puts "Warning: '#{item_query}' not found in Dock, skipping"
+    end
   end
 
   if messages.empty?
-    $stderr.puts "No apps were removed from the Dock"
+    $stderr.puts "No items were removed from the Dock"
     exit 1
   end
 
@@ -543,71 +878,111 @@ def cmd_move(args)
   options = { after: nil }
 
   parser = OptionParser.new do |opts|
-    opts.banner = "Usage: dockedit move --after <target_app> <app_to_move>"
-    opts.on('-a', '--after APP', 'Move after specified app (required, fuzzy match)') { |app| options[:after] = app }
+    opts.banner = "Usage: dockedit move --after <target> <item_to_move>"
+    opts.on('-a', '--after ITEM', 'Move after specified app/folder (required, fuzzy match)') { |app| options[:after] = app }
   end
   parser.order!(args)
 
-  after_app = options[:after]
+  after_target = options[:after]
 
-  unless after_app
+  unless after_target
     $stderr.puts "Error: --after flag is required"
     $stderr.puts parser
     exit 1
   end
 
   if args.empty?
-    $stderr.puts "Error: App to move is required"
+    $stderr.puts "Error: Item to move is required"
     $stderr.puts parser
     exit 1
   end
 
   if args.length > 1
-    $stderr.puts "Error: Only one app can be moved at a time"
+    $stderr.puts "Error: Only one item can be moved at a time"
     exit 1
   end
 
-  app_query = args.first
+  item_query = args.first
 
   doc = load_dock_plist
 
   apps_array = get_persistent_apps(doc)
-  unless apps_array
-    $stderr.puts "Error: Could not find persistent-apps in Dock plist"
+  others_array = get_persistent_others(doc)
+
+  unless apps_array && others_array
+    $stderr.puts "Error: Could not find dock arrays in plist"
     exit 1
   end
+
+  # Find the item to move (check apps first, then folders)
+  move_element = nil
+  move_name = nil
+  move_array = nil
 
   app_dicts = apps_array.elements.to_a.select { |e| e.is_a?(REXML::Element) && e.name == 'dict' }
+  move_index, move_name = find_app_index(app_dicts, item_query)
 
-  # Find the app to move
-  move_index, move_name = find_app_index(app_dicts, app_query)
-  unless move_index
-    $stderr.puts "Error: App '#{app_query}' not found in Dock"
+  if move_index
+    move_element = app_dicts[move_index]
+    move_array = apps_array
+  else
+    folder_dicts = others_array.elements.to_a.select { |e| e.is_a?(REXML::Element) && e.name == 'dict' }
+    move_index, move_name = find_item_index(folder_dicts, item_query, check_url: true)
+
+    if move_index
+      move_element = folder_dicts[move_index]
+      move_array = others_array
+    end
+  end
+
+  unless move_element
+    $stderr.puts "Error: '#{item_query}' not found in Dock"
     exit 1
   end
 
-  # Find the target app
-  after_index, after_name = find_app_index(app_dicts, after_app)
-  unless after_index
-    $stderr.puts "Error: App '#{after_app}' not found in Dock"
+  # Find the target (check apps first, then folders)
+  after_element = nil
+  after_name = nil
+  after_array = nil
+
+  app_dicts = apps_array.elements.to_a.select { |e| e.is_a?(REXML::Element) && e.name == 'dict' }
+  after_index, after_name = find_app_index(app_dicts, after_target)
+
+  if after_index
+    after_element = app_dicts[after_index]
+    after_array = apps_array
+  else
+    folder_dicts = others_array.elements.to_a.select { |e| e.is_a?(REXML::Element) && e.name == 'dict' }
+    after_index, after_name = find_item_index(folder_dicts, after_target, check_url: true)
+
+    if after_index
+      after_element = folder_dicts[after_index]
+      after_array = others_array
+    end
+  end
+
+  unless after_element
+    $stderr.puts "Error: '#{after_target}' not found in Dock"
     exit 1
   end
 
-  # Check if they're the same app
-  if move_index == after_index
-    $stderr.puts "Error: Cannot move an app after itself"
+  # Check if they're the same item
+  if move_element == after_element
+    $stderr.puts "Error: Cannot move an item after itself"
     exit 1
   end
 
-  # Get the element to move
-  move_element = app_dicts[move_index]
-  after_element = app_dicts[after_index]
+  # Check if moving between arrays (apps <-> folders) - not allowed
+  if move_array != after_array
+    $stderr.puts "Error: Cannot move items between apps and folders sections"
+    exit 1
+  end
 
   # Remove from current position
-  apps_array.delete(move_element)
+  move_array.delete(move_element)
 
-  # Insert after target (need to re-find after_element since indices may have shifted)
-  apps_array.insert_after(after_element, move_element)
+  # Insert after target
+  move_array.insert_after(after_element, move_element)
 
   write_plist_and_restart(doc, "'#{move_name}' moved after '#{after_name}'.")
 end
@@ -618,10 +993,12 @@ def main
     opts.banner = "Usage: dockedit <subcommand> [options] [args]"
     opts.separator ""
     opts.separator "Subcommands:"
-    opts.separator "  add [-a|--after <app>] <app>...        Add app(s) to the Dock"
-    opts.separator "  move -a|--after <app> <app>            Move an app after another"
-    opts.separator "  remove <app>...                        Remove app(s) from the Dock"
-    opts.separator "  space [-s|--small] [-a|--after <app>]  Insert space(s) in the Dock"
+    opts.separator "  add [-a|--after <item>] [--show-as TYPE] <item>...  Add app(s)/folder(s)"
+    opts.separator "  move -a|--after <item> <item>                       Move an item after another"
+    opts.separator "  remove <item>...                                    Remove app(s)/folder(s)"
+    opts.separator "  space [-s|--small] [-a|--after <app>]               Insert space(s)"
+    opts.separator ""
+    opts.separator "Folder shortcuts: desktop, downloads, home, library, documents, applications, sites"
     opts.separator ""
     opts.separator "Options:"
     opts.on('-h', '--help', 'Show this help') do
