@@ -1,0 +1,260 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# dockedit - A script to edit the macOS Dock
+# Usage: dockedit <subcommand> [options] [args]
+
+require 'rexml/document'
+require 'fileutils'
+
+DOCK_PLIST = File.expand_path('~/Library/Preferences/com.apple.dock.plist')
+
+# Fuzzy matching for app names
+def fuzzy_match?(query, target)
+  return false if target.nil? || target.empty?
+
+  query = query.downcase
+  target = target.downcase
+
+  # Exact match
+  return true if target == query
+
+  # Contains match
+  return true if target.include?(query)
+
+  # Abbreviation match (e.g., "vscode" matches "Visual Studio Code")
+  # Check if query letters appear in order in target
+  query_chars = query.chars
+  target_pos = 0
+
+  query_chars.each do |char|
+    found = false
+    while target_pos < target.length
+      if target[target_pos] == char
+        found = true
+        target_pos += 1
+        break
+      end
+      target_pos += 1
+    end
+    return false unless found
+  end
+
+  true
+end
+
+# Find app index in persistent-apps array
+def find_app_index(apps_array, query)
+  apps_array.each_with_index do |app_dict, index|
+    next unless app_dict.is_a?(REXML::Element) && app_dict.name == 'dict'
+
+    tile_data = nil
+    in_tile_data = false
+
+    app_dict.elements.each do |elem|
+      if elem.name == 'key' && elem.text == 'tile-data'
+        in_tile_data = true
+        next
+      end
+
+      if in_tile_data && elem.name == 'dict'
+        tile_data = elem
+        break
+      end
+    end
+
+    next unless tile_data
+
+    file_label = nil
+    bundle_id = nil
+    current_key = nil
+
+    tile_data.elements.each do |elem|
+      if elem.name == 'key'
+        current_key = elem.text
+      elsif elem.name == 'string' && current_key
+        case current_key
+        when 'file-label'
+          file_label = elem.text
+        when 'bundle-identifier'
+          bundle_id = elem.text
+        end
+        current_key = nil
+      end
+    end
+
+    if fuzzy_match?(query, file_label) || fuzzy_match?(query, bundle_id)
+      return index, file_label || bundle_id
+    end
+  end
+
+  [nil, nil]
+end
+
+# Create a spacer tile element
+def create_spacer_tile(small: false)
+  tile_type = small ? 'small-spacer-tile' : 'spacer-tile'
+
+  spacer = REXML::Element.new('dict')
+
+  key1 = REXML::Element.new('key')
+  key1.text = 'tile-data'
+  spacer.add(key1)
+
+  tile_data = REXML::Element.new('dict')
+  label_key = REXML::Element.new('key')
+  label_key.text = 'file-label'
+  tile_data.add(label_key)
+  label_string = REXML::Element.new('string')
+  label_string.text = ''
+  tile_data.add(label_string)
+  spacer.add(tile_data)
+
+  key2 = REXML::Element.new('key')
+  key2.text = 'tile-type'
+  spacer.add(key2)
+
+  type_string = REXML::Element.new('string')
+  type_string.text = tile_type
+  spacer.add(type_string)
+
+  spacer
+end
+
+# Get the persistent-apps array from the plist
+def get_persistent_apps(doc)
+  root_dict = doc.root.elements['dict']
+  return nil unless root_dict
+
+  current_key = nil
+  root_dict.elements.each do |elem|
+    if elem.name == 'key'
+      current_key = elem.text
+    elsif elem.name == 'array' && current_key == 'persistent-apps'
+      return elem
+    end
+  end
+
+  nil
+end
+
+# Insert space subcommand
+def cmd_space(args)
+  small = false
+
+  # Parse flags
+  while args.first&.start_with?('-')
+    flag = args.shift
+    case flag
+    when '--half', '--small', '-s'
+      small = true
+    else
+      $stderr.puts "Unknown flag: #{flag}"
+      exit 1
+    end
+  end
+
+  if args.length < 2
+    $stderr.puts "Usage: dockedit space [--half|--small] <app1> <app2>"
+    $stderr.puts "Insert a space between two adjacent apps in the Dock"
+    exit 1
+  end
+
+  app1_query = args[0]
+  app2_query = args[1]
+
+  # Convert plist to XML
+  unless system("plutil -convert xml1 '#{DOCK_PLIST}' 2>/dev/null")
+    $stderr.puts "Error: Failed to convert Dock plist to XML"
+    exit 1
+  end
+
+  # Read and parse the plist
+  plist_content = File.read(DOCK_PLIST)
+  doc = REXML::Document.new(plist_content)
+
+  apps_array = get_persistent_apps(doc)
+  unless apps_array
+    $stderr.puts "Error: Could not find persistent-apps in Dock plist"
+    exit 1
+  end
+
+  # Get array of dict elements only
+  app_dicts = apps_array.elements.to_a.select { |e| e.is_a?(REXML::Element) && e.name == 'dict' }
+
+  # Find both apps
+  index1, name1 = find_app_index(app_dicts, app1_query)
+  index2, name2 = find_app_index(app_dicts, app2_query)
+
+  unless index1
+    $stderr.puts "Error: Could not find app matching '#{app1_query}'"
+    exit 1
+  end
+
+  unless index2
+    $stderr.puts "Error: Could not find app matching '#{app2_query}'"
+    exit 1
+  end
+
+  # Check if adjacent
+  unless (index1 - index2).abs == 1
+    $stderr.puts "Error: Apps must be adjacent"
+    $stderr.puts "  '#{name1}' is at position #{index1 + 1}"
+    $stderr.puts "  '#{name2}' is at position #{index2 + 1}"
+    exit 1
+  end
+
+  # Determine insertion point (after the first app in order)
+  insert_after_index = [index1, index2].min
+  insert_after_element = app_dicts[insert_after_index]
+
+  # Create spacer tile
+  spacer = create_spacer_tile(small: small)
+
+  # Insert spacer after the first app
+  apps_array.insert_after(insert_after_element, spacer)
+
+  # Write back to file
+  formatter = REXML::Formatters::Pretty.new(2)
+  formatter.compact = true
+
+  output = StringIO.new
+  output << %{<?xml version="1.0" encoding="UTF-8"?>\n}
+  output << %{<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n}
+  formatter.write(doc.root, output)
+  output << "\n"
+
+  File.write(DOCK_PLIST, output.string)
+
+  # Convert back to binary and restart Dock
+  system("plutil -convert binary1 '#{DOCK_PLIST}' 2>/dev/null")
+  system('killall Dock')
+
+  spacer_type = small ? 'small space' : 'space'
+  puts "#{spacer_type.capitalize} inserted between '#{name1}' and '#{name2}'."
+  exit 0
+end
+
+# Main entry point
+def main
+  if ARGV.empty?
+    puts "Usage: dockedit <subcommand> [options] [args]"
+    puts ""
+    puts "Subcommands:"
+    puts "  space [--half|--small] <app1> <app2>  Insert a space between two adjacent apps"
+    exit 0
+  end
+
+  subcommand = ARGV.shift
+
+  case subcommand
+  when 'space'
+    cmd_space(ARGV)
+  else
+    $stderr.puts "Unknown subcommand: #{subcommand}"
+    $stderr.puts "Run 'dockedit' without arguments to see available subcommands"
+    exit 1
+  end
+end
+
+main
