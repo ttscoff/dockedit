@@ -3,6 +3,7 @@
 require 'bundler/gem_tasks'
 require 'rake'
 require 'rdoc/task'
+require 'rspec/core/rake_task'
 require_relative 'lib/dockedit/version'
 
 # Load the gemspec
@@ -72,6 +73,11 @@ task :build do
   sh 'gem build dockedit.gemspec'
   FileUtils.mv("dockedit-#{DockEdit::VERSION}.gem", "pkg/dockedit-#{DockEdit::VERSION}.gem")
   puts "Built gem: pkg/dockedit-#{DockEdit::VERSION}.gem"
+end
+
+desc 'Run the test suite (RSpec)'
+RSpec::Core::RakeTask.new(:test) do |t|
+  t.pattern = 'spec/**/*_spec.rb'
 end
 
 desc 'Generate RDoc documentation'

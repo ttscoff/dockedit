@@ -14,7 +14,7 @@ gem install dockedit
 
 ```bash
 bundle install
-bundle exec rake rspec
+bundle exec rake test
 ```
 
 This installs the `dockedit` executable.

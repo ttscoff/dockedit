@@ -8,6 +8,7 @@ GEM
   remote: https://rubygems.org/
   specs:
     diff-lcs (1.6.2)
+    rake (13.3.1)
     rexml (3.4.4)
     rspec (3.13.2)
       rspec-core (~> 3.13.0)
@@ -29,6 +30,7 @@ PLATFORMS
 
 DEPENDENCIES
   dockedit!
+  rake (~> 13.2)
   rspec (~> 3.12)
 
 BUNDLED WITH
