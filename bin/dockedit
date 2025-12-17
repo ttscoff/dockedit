@@ -1,0 +1,10 @@
+#!/usr/bin/env ruby
+# frozen_string_literal: true
+
+# dockedit - A script to edit the macOS Dock
+# Usage: dockedit <subcommand> [options] [args]
+
+require 'dockedit'
+
+DockEdit::CLI.run
+

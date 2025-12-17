@@ -1,0 +1,58 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  release:
+    name: Create Release and Publish to RubyGems
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set up Ruby
+        uses: ruby/setup-ruby@v1
+        with:
+          ruby-version: '3.0'
+          bundler-cache: true
+
+      - name: Build gem
+        run: |
+          gem build dockedit.gemspec
+
+      - name: Get version from tag
+        id: get_version
+        run: |
+          VERSION=${GITHUB_REF#refs/tags/v}
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+          echo "Built version: $VERSION"
+
+      - name: Verify gem file exists
+        run: |
+          if [ ! -f "dockedit-${{ steps.get_version.outputs.version }}.gem" ]; then
+            echo "Error: Gem file not found"
+            exit 1
+          fi
+          ls -lh dockedit-${{ steps.get_version.outputs.version }}.gem
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          files: |
+            dockedit-${{ steps.get_version.outputs.version }}.gem
+          generate_release_notes: true
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish to RubyGems
+        run: |
+          gem push dockedit-${{ steps.get_version.outputs.version }}.gem
+        env:
+          RUBYGEMS_API_KEY: ${{ secrets.RUBYGEMS_API_KEY }}
+
