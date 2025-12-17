@@ -2,10 +2,11 @@
 
 require 'bundler/gem_tasks'
 require 'rake'
+require 'rdoc/task'
 require_relative 'lib/dockedit/version'
 
 # Load the gemspec
-gemspec = Gem::Specification.load('dockedit.gemspec')
+Gem::Specification.load('dockedit.gemspec')
 
 namespace :version do
   desc 'Bump version: major, minor, or patch'
@@ -45,7 +46,7 @@ namespace :version do
     puts "  git add #{version_file}"
     puts "  git commit -m 'Bump version to #{new_version}'"
     puts "  git tag -a v#{new_version} -m 'Version #{new_version}'"
-    puts "  git push && git push --tags"
+    puts '  git push && git push --tags'
   end
 
   desc 'Show current version'
@@ -68,16 +69,23 @@ task :build do
 
   FileUtils.mkdir_p('pkg')
 
-  sh "gem build dockedit.gemspec"
+  sh 'gem build dockedit.gemspec'
   FileUtils.mv("dockedit-#{DockEdit::VERSION}.gem", "pkg/dockedit-#{DockEdit::VERSION}.gem")
   puts "Built gem: pkg/dockedit-#{DockEdit::VERSION}.gem"
 end
 
+desc 'Generate RDoc documentation'
+RDoc::Task.new(:rdoc) do |rdoc|
+  rdoc.rdoc_dir = 'doc'
+  rdoc.title    = "dockedit #{DockEdit::VERSION}"
+  rdoc.options  = ['--line-numbers', '--inline-source']
+  rdoc.rdoc_files.include('README.md', 'lib/**/*.rb')
+end
+
 desc 'Package the gem (build and place in pkg/)'
-task package: [:clobber, :build]
+task package: %i[clobber build]
 
 desc 'Install the gem locally'
 task :install do
   sh "gem install pkg/dockedit-#{DockEdit::VERSION}.gem"
 end
-

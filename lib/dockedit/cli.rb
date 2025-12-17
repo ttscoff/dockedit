@@ -1,8 +1,15 @@
 # frozen_string_literal: true
 
 module DockEdit
-  # Command-line interface and option parsing
+  # Command-line interface and option parsing for the `dockedit` executable.
+  #
+  # This class is responsible for parsing global arguments and subcommands and
+  # delegating to the appropriate handlers in {DockEdit::Commands}.
   class CLI
+    # Build the option parser for the `add` subcommand.
+    #
+    # @param options [Hash] Mutable options hash to be populated by OptionParser.
+    # @return [OptionParser] Configured parser instance.
     def self.add_parser(options)
       OptionParser.new do |opts|
         opts.banner = "Usage: dockedit add [options] <app_or_folder> [...]"
@@ -18,6 +25,10 @@ module DockEdit
       end
     end
 
+    # Build the option parser for the `space` subcommand.
+    #
+    # @param options [Hash] Mutable options hash to be populated by OptionParser.
+    # @return [OptionParser] Configured parser instance.
     def self.space_parser(options)
       OptionParser.new do |opts|
         opts.banner = "Usage: dockedit space [options]"
@@ -32,6 +43,10 @@ module DockEdit
       end
     end
 
+    # Build the option parser for the `move` subcommand.
+    #
+    # @param options [Hash] Mutable options hash to be populated by OptionParser.
+    # @return [OptionParser] Configured parser instance.
     def self.move_parser(options)
       OptionParser.new do |opts|
         opts.banner = "Usage: dockedit move --after <target> <item_to_move> OR dockedit move <item_to_move> --after <target>"
@@ -43,6 +58,10 @@ module DockEdit
       end
     end
 
+    # Build the option parser for the `remove` subcommand.
+    #
+    # @param _options [Hash] Present for API symmetry; currently unused.
+    # @return [OptionParser] Configured parser instance.
     def self.remove_parser(_options = {})
       OptionParser.new do |opts|
         opts.banner = "Usage: dockedit remove <app_or_folder> [...]"
@@ -54,6 +73,11 @@ module DockEdit
       end
     end
 
+    # Build the top-level option parser for the `dockedit` command.
+    #
+    # This parser prints a summary of all subcommands and global options.
+    #
+    # @return [OptionParser]
     def self.main_parser
       OptionParser.new do |opts|
         opts.banner = "Usage: dockedit <subcommand> [options] [args]"
@@ -84,7 +108,12 @@ module DockEdit
       end
     end
 
-    # Main entry point
+    # Main entry point for the `dockedit` CLI.
+    #
+    # Reads +ARGV+, dispatches to subcommands, and exits with an appropriate
+    # status code.
+    #
+    # @return [void]
     def self.run
       global_parser = main_parser
 

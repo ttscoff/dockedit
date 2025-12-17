@@ -1,9 +1,20 @@
 # frozen_string_literal: true
 
 module DockEdit
-  # Handles finding applications on disk
+  # Handles finding applications on disk using Spotlight (mdfind).
+  #
+  # This class is used by commands that accept an application name (e.g. "Safari")
+  # and need to resolve it to a full `.app` bundle path.
   class AppFinder
-    # Find app on disk using mdfind
+    # Find an application bundle on disk using Spotlight.
+    #
+    # The search is limited to `/Applications` and `/System/Applications`.
+    # Results are scored using {DockEdit::Matcher.match_score} and the best
+    # matching `.app` path is returned.
+    #
+    # @param query [String] Human-friendly app name to search for.
+    # @return [String, nil] Absolute path to the best matching `.app`, or +nil+
+    #   if no match is found.
     def self.find_app_on_disk(query)
       # Search in /Applications and /System/Applications
       result = `mdfind -onlyin /Applications -onlyin /System/Applications 'kMDItemKind == "Application" && kMDItemDisplayName == "*#{query}*"cd' 2>/dev/null`.strip

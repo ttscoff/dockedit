@@ -1,9 +1,18 @@
 # frozen_string_literal: true
 
 module DockEdit
-  # Handles fuzzy matching for app names and dock items
+  # Handles fuzzy matching for application names and Dock items.
+  #
+  # Matching is based on a simple scoring system that prefers exact matches,
+  # then "starts with", then substring and abbreviation matches.
   class Matcher
-    # Calculate match score (lower is better, nil means no match)
+    # Calculate a fuzzy match score between two strings.
+    #
+    # A lower score means a better match. +nil+ indicates no match at all.
+    #
+    # @param query [String] User-entered search text.
+    # @param target [String] Candidate string to score against.
+    # @return [Integer, nil] Score where 0 is best, or +nil+ when there is no match.
     def self.match_score(query, target)
       return nil if target.nil? || target.empty?
 
@@ -47,13 +56,26 @@ module DockEdit
       nil
     end
 
-    # Fuzzy matching for app names
+    # Check whether +target+ fuzzily matches +query+.
+    #
+    # @param query [String]
+    # @param target [String]
+    # @return [Boolean] +true+ if {#match_score} returns a non-nil score.
     def self.fuzzy_match?(query, target)
       !match_score(query, target).nil?
     end
 
-    # Find item index in a dock array (persistent-apps or persistent-others)
-    # For folders, also checks file-data._CFURLString
+    # Find the best-matching item index in a Dock array.
+    #
+    # This scans a list of Dock tile `<dict>` elements and finds the index
+    # whose label, bundle identifier, or (optionally) URL path best matches
+    # +query+.
+    #
+    # @param items_array [Array<REXML::Element>] Array of tile `<dict>` elements.
+    # @param query [String] Search term (app name, bundle id, or path fragment).
+    # @param check_url [Boolean] Whether to also consider the folder URL path.
+    # @return [Array<(Integer, String)>] A pair of `[index, display_name]`, where
+    #   +index+ is the best entry index or +nil+ when nothing matches.
     def self.find_item_index(items_array, query, check_url: false)
       best_score = nil
       best_name = nil
@@ -101,7 +123,11 @@ module DockEdit
       [best_index, best_name]
     end
 
-    # Alias for backward compatibility
+    # Backwards-compatible alias for finding app indices.
+    #
+    # @param apps_array [Array<REXML::Element>] App tile `<dict>` elements.
+    # @param query [String] Search term.
+    # @return [Array<(Integer, String)>] See {#find_item_index}.
     def self.find_app_index(apps_array, query)
       find_item_index(apps_array, query, check_url: false)
     end

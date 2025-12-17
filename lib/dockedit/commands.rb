@@ -1,9 +1,17 @@
 # frozen_string_literal: true
 
 module DockEdit
-  # Command handlers for dockedit subcommands
+  # Command handlers for `dockedit` subcommands.
+  #
+  # Each method in this module implements the behavior for a single
+  # subcommand, operating on the Dock plist via {DockEdit::Dock}.
   module Commands
-    # Insert space subcommand
+    # Implementation of the `space` subcommand.
+    #
+    # Inserts one or more spacer tiles in the apps section of the Dock.
+    #
+    # @param args [Array<String>] Command-line arguments for the subcommand.
+    # @return [void]
     def self.space(args)
       options = { small: false, after: [] }
 
@@ -43,7 +51,13 @@ module DockEdit
       dock.save(messages)
     end
 
-    # Add app/folder subcommand
+    # Implementation of the `add` subcommand.
+    #
+    # Adds applications and/or folders to the Dock, optionally positioning
+    # them relative to an existing item and updating folder view/style.
+    #
+    # @param args [Array<String>] Command-line arguments for the subcommand.
+    # @return [void]
     def self.add(args)
       options = { after: nil, show_as: nil, display_as: nil }
 
@@ -213,7 +227,13 @@ module DockEdit
       dock.save(messages)
     end
 
-    # Remove app/folder subcommand
+    # Implementation of the `remove` subcommand.
+    #
+    # Removes apps and/or folders from the Dock by name, bundle identifier,
+    # or path.
+    #
+    # @param args [Array<String>] Command-line arguments for the subcommand.
+    # @return [void]
     def self.remove(args)
       parser = CLI.remove_parser({})
       parser.order!(args)
@@ -268,7 +288,12 @@ module DockEdit
       dock.save(messages)
     end
 
-    # Move app subcommand
+    # Implementation of the `move` subcommand.
+    #
+    # Moves an existing Dock item after another item in the same section.
+    #
+    # @param args [Array<String>] Command-line arguments for the subcommand.
+    # @return [void]
     def self.move(args)
       # Accept either order: move --after TARGET ITEM or move ITEM --after TARGET
       options = { after: nil }

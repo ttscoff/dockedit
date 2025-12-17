@@ -1,11 +1,22 @@
 # frozen_string_literal: true
 
 module DockEdit
-  # Handles writing plist data and restarting the Dock
+  # Handles writing Dock plist data and restarting the Dock process.
   class PlistWriter
     include Constants
 
-    # Write plist and restart dock
+    # Write the modified Dock plist and restart the Dock.
+    #
+    # The provided document is pretty-printed, written to
+    # {DockEdit::Constants::DOCK_PLIST}, converted back to binary format,
+    # and the Dock process is restarted. Success messages are printed and
+    # the process exits with status 0. On error, a message is printed and
+    # the process exits with status 1.
+    #
+    # @param doc [REXML::Document] Modified Dock plist document.
+    # @param success_messages [String, Array<String>] Message or messages to
+    #   print after a successful write.
+    # @return [void]
     def self.write_plist_and_restart(doc, success_messages)
       formatter = REXML::Formatters::Pretty.new(2)
       formatter.compact = true

@@ -1,9 +1,15 @@
 # frozen_string_literal: true
 
 module DockEdit
-  # Factory for creating dock tile elements
+  # Factory for creating Dock tile elements.
+  #
+  # These helpers construct the REXML structures that represent apps,
+  # folders, and spacer tiles inside the Dock plist.
   class TileFactory
-    # Create a spacer tile element
+    # Create a spacer tile element.
+    #
+    # @param small [Boolean] When +true+, create a half-size spacer.
+    # @return [REXML::Element] Newly created tile `<dict>` element.
     def self.create_spacer_tile(small: false)
       tile_type = small ? 'small-spacer-tile' : 'spacer-tile'
 
@@ -33,7 +39,11 @@ module DockEdit
       spacer
     end
 
-    # Create an app tile element
+    # Create an app tile element.
+    #
+    # @param app_path [String] Absolute path to the `.app` bundle.
+    # @param app_info [Hash] Parsed plist info from {PlistReader.read_app_info}.
+    # @return [REXML::Element] Newly created tile `<dict>` element.
     def self.create_app_tile(app_path, app_info)
       app_dict = REXML::Element.new('dict')
 
@@ -91,7 +101,12 @@ module DockEdit
       app_dict
     end
 
-    # Create a folder tile element
+    # Create a folder tile element.
+    #
+    # @param folder_path [String] Absolute path to the folder.
+    # @param show_as [Integer] Show-as value (1=fan, 2=grid, 3=list, 4=auto).
+    # @param display_as [Integer] Display-as value (0=stack, 1=folder).
+    # @return [REXML::Element] Newly created folder tile `<dict>` element.
     def self.create_folder_tile(folder_path, show_as: 4, display_as: 1)
       folder_dict = REXML::Element.new('dict')
 
@@ -153,7 +168,13 @@ module DockEdit
       folder_dict
     end
 
-    # Helper to add key/value pair to plist dict
+    # Helper to add a key/value pair to a plist `<dict>` element.
+    #
+    # @param dict [REXML::Element] Target `<dict>` element.
+    # @param key_name [String] Key to add.
+    # @param value_type [String] Name of the value element type (e.g. "string").
+    # @param value [String, nil] Optional text value for the element.
+    # @return [void]
     def self.add_plist_key_value(dict, key_name, value_type, value)
       key = REXML::Element.new('key')
       key.text = key_name
