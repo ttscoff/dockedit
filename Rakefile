@@ -153,7 +153,7 @@ task :release, [:level] do |_t, args|
 
   # Save commit message to a file for use with both commit and tag
   require 'tempfile'
-  message_file = Tempfile.create('release_msg')
+  message_file = Tempfile.new('release_msg')
   message_file.write(commit_message)
   message_file.close
   message_path = message_file.path

@@ -1,7 +1,7 @@
 PATH
   remote: .
   specs:
-    dockedit (1.0.0)
+    dockedit (1.0.1)
       rexml (~> 3.2)
 
 GEM
