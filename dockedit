@@ -538,6 +538,80 @@ def cmd_remove(args)
   write_plist_and_restart(doc, messages)
 end
 
+# Move app subcommand
+def cmd_move(args)
+  options = { after: nil }
+
+  parser = OptionParser.new do |opts|
+    opts.banner = "Usage: dockedit move --after <target_app> <app_to_move>"
+    opts.on('-a', '--after APP', 'Move after specified app (required, fuzzy match)') { |app| options[:after] = app }
+  end
+  parser.order!(args)
+
+  after_app = options[:after]
+
+  unless after_app
+    $stderr.puts "Error: --after flag is required"
+    $stderr.puts parser
+    exit 1
+  end
+
+  if args.empty?
+    $stderr.puts "Error: App to move is required"
+    $stderr.puts parser
+    exit 1
+  end
+
+  if args.length > 1
+    $stderr.puts "Error: Only one app can be moved at a time"
+    exit 1
+  end
+
+  app_query = args.first
+
+  doc = load_dock_plist
+
+  apps_array = get_persistent_apps(doc)
+  unless apps_array
+    $stderr.puts "Error: Could not find persistent-apps in Dock plist"
+    exit 1
+  end
+
+  app_dicts = apps_array.elements.to_a.select { |e| e.is_a?(REXML::Element) && e.name == 'dict' }
+
+  # Find the app to move
+  move_index, move_name = find_app_index(app_dicts, app_query)
+  unless move_index
+    $stderr.puts "Error: App '#{app_query}' not found in Dock"
+    exit 1
+  end
+
+  # Find the target app
+  after_index, after_name = find_app_index(app_dicts, after_app)
+  unless after_index
+    $stderr.puts "Error: App '#{after_app}' not found in Dock"
+    exit 1
+  end
+
+  # Check if they're the same app
+  if move_index == after_index
+    $stderr.puts "Error: Cannot move an app after itself"
+    exit 1
+  end
+
+  # Get the element to move
+  move_element = app_dicts[move_index]
+  after_element = app_dicts[after_index]
+
+  # Remove from current position
+  apps_array.delete(move_element)
+
+  # Insert after target (need to re-find after_element since indices may have shifted)
+  apps_array.insert_after(after_element, move_element)
+
+  write_plist_and_restart(doc, "'#{move_name}' moved after '#{after_name}'.")
+end
+
 # Main entry point
 def main
   global_parser = OptionParser.new do |opts|
@@ -545,6 +619,7 @@ def main
     opts.separator ""
     opts.separator "Subcommands:"
     opts.separator "  add [-a|--after <app>] <app>...        Add app(s) to the Dock"
+    opts.separator "  move -a|--after <app> <app>            Move an app after another"
     opts.separator "  remove <app>...                        Remove app(s) from the Dock"
     opts.separator "  space [-s|--small] [-a|--after <app>]  Insert space(s) in the Dock"
     opts.separator ""
@@ -565,6 +640,8 @@ def main
   case subcommand
   when 'add'
     cmd_add(ARGV)
+  when 'move'
+    cmd_move(ARGV)
   when 'remove'
     cmd_remove(ARGV)
   when 'space'
