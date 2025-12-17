@@ -308,7 +308,7 @@ def add_plist_key_value(dict, key_name, value_type, value)
 end
 
 # Write plist and restart dock
-def write_plist_and_restart(doc, success_message)
+def write_plist_and_restart(doc, success_messages)
   formatter = REXML::Formatters::Pretty.new(2)
   formatter.compact = true
 
@@ -332,7 +332,10 @@ def write_plist_and_restart(doc, success_message)
   end
 
   system('killall Dock')
-  puts success_message
+
+  # Handle single message or array of messages
+  messages = success_messages.is_a?(Array) ? success_messages : [success_messages]
+  messages.each { |msg| puts msg }
   exit 0
 end
 
@@ -349,17 +352,18 @@ end
 
 # Insert space subcommand
 def cmd_space(args)
-  options = { small: false, after: nil }
-  
+  options = { small: false, after: [] }
+
   parser = OptionParser.new do |opts|
     opts.banner = "Usage: dockedit space [options]"
     opts.on('-s', '--small', '--half', 'Insert a small/half-size space') { options[:small] = true }
-    opts.on('-a', '--after APP', 'Insert after specified app (fuzzy match)') { |app| options[:after] = app }
+    opts.on('-a', '--after APP', 'Insert after specified app (fuzzy match, repeatable)') { |app| options[:after] << app }
   end
-  parser.order!(args) # order! allows flags anywhere
-  
+  parser.order!(args)
+
   small = options[:small]
-  after_app = options[:after]
+  after_apps = options[:after]
+  spacer_type = small ? 'Small space' : 'Space'
 
   doc = load_dock_plist
 
@@ -369,64 +373,50 @@ def cmd_space(args)
     exit 1
   end
 
-  # Get array of dict elements only
-  app_dicts = apps_array.elements.to_a.select { |e| e.is_a?(REXML::Element) && e.name == 'dict' }
+  messages = []
 
-  # Create spacer tile
-  spacer = create_spacer_tile(small: small)
-  spacer_type = small ? 'Small space' : 'Space'
-
-  if after_app
-    # Find the app to insert after
-    index, name = find_app_index(app_dicts, after_app)
-    unless index
-      $stderr.puts "Error: App '#{after_app}' not found in Dock"
-      exit 1
-    end
-
-    apps_array.insert_after(app_dicts[index], spacer)
-    write_plist_and_restart(doc, "#{spacer_type} inserted after '#{name}'.")
-  else
-    # Add at end
+  if after_apps.empty?
+    # Add single space at end
+    spacer = create_spacer_tile(small: small)
     apps_array.add(spacer)
-    write_plist_and_restart(doc, "#{spacer_type} added to end of Dock.")
+    messages << "#{spacer_type} added to end of Dock."
+  else
+    # Process each --after app
+    after_apps.each do |after_app|
+      # Re-fetch app_dicts each time since array changes after insert
+      app_dicts = apps_array.elements.to_a.select { |e| e.is_a?(REXML::Element) && e.name == 'dict' }
+
+      index, name = find_app_index(app_dicts, after_app)
+      unless index
+        $stderr.puts "Error: App '#{after_app}' not found in Dock"
+        exit 1
+      end
+
+      spacer = create_spacer_tile(small: small)
+      apps_array.insert_after(app_dicts[index], spacer)
+      messages << "#{spacer_type} inserted after '#{name}'."
+    end
   end
+
+  write_plist_and_restart(doc, messages)
 end
 
 # Add app subcommand
 def cmd_add(args)
   options = { after: nil }
-  
+
   parser = OptionParser.new do |opts|
-    opts.banner = "Usage: dockedit add [options] <app_name>"
+    opts.banner = "Usage: dockedit add [options] <app_name> [app_name...]"
     opts.on('-a', '--after APP', 'Insert after specified app (fuzzy match)') { |app| options[:after] = app }
   end
   parser.order!(args)
-  
+
   after_app = options[:after]
-  
+
   if args.empty?
     $stderr.puts parser
     exit 1
   end
-
-  app_query = args.join(' ')
-
-  # Find the app on disk
-  app_path = find_app_on_disk(app_query)
-  unless app_path
-    $stderr.puts "Error: App '#{app_query}' not found"
-    exit 1
-  end
-
-  # Read app info
-  app_info = read_app_info(app_path)
-  unless app_info && app_info['CFBundleIdentifier']
-    $stderr.puts "Error: Could not read app info from '#{app_path}'"
-    exit 1
-  end
-
-  app_name = app_info['CFBundleName'] || app_info['CFBundleDisplayName'] || File.basename(app_path, '.app')
 
   doc = load_dock_plist
 
@@ -436,48 +426,81 @@ def cmd_add(args)
     exit 1
   end
 
-  # Check if app is already in dock
-  app_dicts = apps_array.elements.to_a.select { |e| e.is_a?(REXML::Element) && e.name == 'dict' }
-  existing_index, existing_name = find_app_index(app_dicts, app_info['CFBundleIdentifier'])
+  messages = []
+  last_inserted_element = nil
 
-  if existing_index
-    $stderr.puts "Error: '#{existing_name}' is already in the Dock"
-    exit 1
-  end
-
-  # Create the app tile
-  app_tile = create_app_tile(app_path, app_info)
-
+  # Find initial insertion point if --after specified
   if after_app
-    # Find the app to insert after
+    app_dicts = apps_array.elements.to_a.select { |e| e.is_a?(REXML::Element) && e.name == 'dict' }
     after_index, after_name = find_app_index(app_dicts, after_app)
     unless after_index
       $stderr.puts "Error: App '#{after_app}' not found in Dock"
       exit 1
     end
-
-    apps_array.insert_after(app_dicts[after_index], app_tile)
-    write_plist_and_restart(doc, "'#{app_name}' added to Dock after '#{after_name}'.")
-  else
-    # Add at end
-    apps_array.add(app_tile)
-    write_plist_and_restart(doc, "'#{app_name}' added to Dock.")
+    last_inserted_element = app_dicts[after_index]
   end
+
+  # Process each app argument
+  args.each do |app_query|
+    # Find the app on disk
+    app_path = find_app_on_disk(app_query)
+    unless app_path
+      $stderr.puts "Error: App '#{app_query}' not found"
+      exit 1
+    end
+
+    # Read app info
+    app_info = read_app_info(app_path)
+    unless app_info && app_info['CFBundleIdentifier']
+      $stderr.puts "Error: Could not read app info from '#{app_path}'"
+      exit 1
+    end
+
+    app_name = app_info['CFBundleName'] || app_info['CFBundleDisplayName'] || File.basename(app_path, '.app')
+
+    # Check if app is already in dock
+    app_dicts = apps_array.elements.to_a.select { |e| e.is_a?(REXML::Element) && e.name == 'dict' }
+    existing_index, existing_name = find_app_index(app_dicts, app_info['CFBundleIdentifier'])
+
+    if existing_index
+      $stderr.puts "Warning: '#{existing_name}' is already in the Dock, skipping"
+      next
+    end
+
+    # Create the app tile
+    app_tile = create_app_tile(app_path, app_info)
+
+    if last_inserted_element
+      # Insert after the last inserted element (maintains order)
+      apps_array.insert_after(last_inserted_element, app_tile)
+      messages << "'#{app_name}' added to Dock."
+      last_inserted_element = app_tile
+    else
+      # Add at end
+      apps_array.add(app_tile)
+      messages << "'#{app_name}' added to Dock."
+    end
+  end
+
+  if messages.empty?
+    $stderr.puts "No apps were added to the Dock"
+    exit 1
+  end
+
+  write_plist_and_restart(doc, messages)
 end
 
 # Remove app subcommand
 def cmd_remove(args)
   parser = OptionParser.new do |opts|
-    opts.banner = "Usage: dockedit remove <app_name>"
+    opts.banner = "Usage: dockedit remove <app_name> [app_name...]"
   end
   parser.order!(args)
-  
+
   if args.empty?
     $stderr.puts parser
     exit 1
   end
-
-  app_query = args.join(' ')
 
   doc = load_dock_plist
 
@@ -487,21 +510,32 @@ def cmd_remove(args)
     exit 1
   end
 
-  # Get array of dict elements only
-  app_dicts = apps_array.elements.to_a.select { |e| e.is_a?(REXML::Element) && e.name == 'dict' }
+  messages = []
 
-  # Find the app
-  index, name = find_app_index(app_dicts, app_query)
+  # Process each app argument
+  args.each do |app_query|
+    # Re-fetch app_dicts each time since array changes after delete
+    app_dicts = apps_array.elements.to_a.select { |e| e.is_a?(REXML::Element) && e.name == 'dict' }
 
-  unless index
-    $stderr.puts "Error: App '#{app_query}' not found in Dock"
+    # Find the app
+    index, name = find_app_index(app_dicts, app_query)
+
+    unless index
+      $stderr.puts "Warning: App '#{app_query}' not found in Dock, skipping"
+      next
+    end
+
+    # Remove the app from the array
+    apps_array.delete(app_dicts[index])
+    messages << "'#{name}' removed from Dock."
+  end
+
+  if messages.empty?
+    $stderr.puts "No apps were removed from the Dock"
     exit 1
   end
 
-  # Remove the app from the array
-  apps_array.delete(app_dicts[index])
-
-  write_plist_and_restart(doc, "'#{name}' removed from Dock.")
+  write_plist_and_restart(doc, messages)
 end
 
 # Main entry point
@@ -510,9 +544,9 @@ def main
     opts.banner = "Usage: dockedit <subcommand> [options] [args]"
     opts.separator ""
     opts.separator "Subcommands:"
-    opts.separator "  add [-a|--after <app>] <app_name>   Add an app to the Dock"
-    opts.separator "  remove <app_name>                   Remove an app from the Dock"
-    opts.separator "  space [-s|--small] [-a|--after <app>]  Insert a space in the Dock"
+    opts.separator "  add [-a|--after <app>] <app>...        Add app(s) to the Dock"
+    opts.separator "  remove <app>...                        Remove app(s) from the Dock"
+    opts.separator "  space [-s|--small] [-a|--after <app>]  Insert space(s) in the Dock"
     opts.separator ""
     opts.separator "Options:"
     opts.on('-h', '--help', 'Show this help') do
