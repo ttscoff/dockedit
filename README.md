@@ -19,6 +19,16 @@ bundle exec rake test
 
 This installs the `dockedit` executable.
 
+- **Standalone file** (no gem install required):
+
+The repository includes a standalone `dockedit` file in the root directory that can be used directly without installing the gem. To regenerate this file after making changes to library files, run:
+
+```bash
+ruby build_standalone.rb
+```
+
+**Note**: If you add new library files, you must include them in the `FILE_ORDER` array in `build_standalone.rb` before running the script.
+
 ### Basic usage
 
 ```bash
